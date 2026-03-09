@@ -1,0 +1,87 @@
+trigger:
+  branches:
+    include:
+      - main
+
+variables:
+  - name: ACR_NAME
+    value: "happiregistry2025"  # Update with your actual ACR name
+  - name: AKS_RESOURCE_GROUP
+    value: "rg-happimaintenance"
+  - name: AKS_CLUSTER_NAME
+    value: "happi-aks"
+  - name: IMAGE_NAME
+    value: "happi-api"
+  - name: K8S_NAMESPACE
+    value: "happimaintenance"
+
+stages:
+  # ---- Stage 1: Test ----
+  - stage: Test
+    displayName: "Run Tests"
+    jobs:
+      - job: RunTests
+        pool:
+          vmImage: "ubuntu-latest"
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: "3.12"
+              addToPath: true
+            displayName: "Use Python 3.12"
+
+          - script: |
+              python -m pip install --upgrade pip
+              pip install -r requirements.txt
+            displayName: "Install dependencies"
+
+          - script: |
+              python -m pytest tests/ -v --tb=short
+            displayName: "Run pytest"
+
+  # ---- Stage 2: Build & Deploy ----
+  - stage: BuildAndDeploy
+    displayName: "Build & Deploy to AKS"
+    dependsOn: Test
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - job: BuildAndPush
+        pool:
+          vmImage: "ubuntu-latest"
+        steps:
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: "azure-service-connection"  # Update with your service connection name
+              scriptType: "bash"
+              scriptLocation: "inlineScript"
+              inlineScript: |
+                # Login to ACR
+                az acr login --name $(ACR_NAME)
+
+                # Build and tag image
+                IMAGE_TAG=$(Build.BuildId)
+                FULL_IMAGE="$(ACR_NAME).azurecr.io/$(IMAGE_NAME):${IMAGE_TAG}"
+                LATEST_IMAGE="$(ACR_NAME).azurecr.io/$(IMAGE_NAME):latest"
+
+                docker build -t ${FULL_IMAGE} -t ${LATEST_IMAGE} .
+                docker push ${FULL_IMAGE}
+                docker push ${LATEST_IMAGE}
+
+                # Get AKS credentials
+                az aks get-credentials \
+                  --resource-group $(AKS_RESOURCE_GROUP) \
+                  --name $(AKS_CLUSTER_NAME) \
+                  --overwrite-existing
+
+                # Apply k8s manifests
+                kubectl apply -f k8s/ -n $(K8S_NAMESPACE)
+
+                # Update deployment image
+                kubectl set image deployment/happi-api \
+                  happi-api=${FULL_IMAGE} \
+                  -n $(K8S_NAMESPACE)
+
+                # Wait for rollout
+                kubectl rollout status deployment/happi-api \
+                  -n $(K8S_NAMESPACE) --timeout=120s
+            displayName: "Build, Push & Deploy"

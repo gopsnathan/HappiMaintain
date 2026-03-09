@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: happi-web
+  namespace: happimaintenance
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: happi-web
+  template:
+    metadata:
+      labels:
+        app: happi-web
+    spec:
+      containers:
+        - name: happi-web
+          image: happiregistry2025.azurecr.io/happi-web:latest
+          ports:
+            - containerPort: 3000
+          env:
+            - name: NEXT_PUBLIC_API_URL
+              value: "http://api.20.99.183.136.nip.io"
+          resources:
+            requests:
+              cpu: "1m"
+              memory: "128Mi"
+            limits:
+              cpu: "300m"
+              memory: "384Mi"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 3000
+            initialDelaySeconds: 15
+            periodSeconds: 30
