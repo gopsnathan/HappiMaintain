@@ -1,0 +1,88 @@
+name: HappiMaintenance Web PROD
+
+on:
+  push:
+    branches:
+      - main
+
+env:
+  ACR_NAME: happiregistry2025
+  AKS_RESOURCE_GROUP: rg-happimaintenance
+  AKS_CLUSTER_NAME: happi-aks
+  IMAGE_NAME: happi-web
+  K8S_NAMESPACE: happimaintenance
+  INGRESS_IP: 20.99.183.136
+
+jobs:
+
+  test:
+    name: Lint & Build Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - run: npm ci
+
+      - run: npm run lint
+
+      - run: npm run build
+        env:
+          NEXT_PUBLIC_API_URL: http://api.localhost.nip.io
+
+  build-and-deploy:
+    name: Build & Deploy
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Login to ACR
+        run: az acr login --name $ACR_NAME
+
+      - name: Build & Push Docker Image
+        run: |
+          IMAGE_TAG=${{ github.run_number }}
+          FULL_IMAGE=${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}
+          LATEST_IMAGE=${ACR_NAME}.azurecr.io/${IMAGE_NAME}:latest
+
+          docker build \
+            --build-arg NEXT_PUBLIC_API_URL="http://api.${INGRESS_IP}.nip.io" \
+            -t $FULL_IMAGE -t $LATEST_IMAGE .
+
+          docker push $FULL_IMAGE
+          docker push $LATEST_IMAGE
+
+          echo "FULL_IMAGE=$FULL_IMAGE" >> $GITHUB_ENV
+
+      - name: Get AKS Credentials
+        run: |
+          az aks get-credentials \
+            --resource-group $AKS_RESOURCE_GROUP \
+            --name $AKS_CLUSTER_NAME \
+            --overwrite-existing
+
+      - name: Deploy manifests
+        run: kubectl apply -f k8s/ -n $K8S_NAMESPACE
+
+      - name: Update deployment
+        run: |
+          kubectl set image deployment/happi-web \
+          happi-web=${{ env.FULL_IMAGE }} \
+          -n $K8S_NAMESPACE
+
+      - name: Wait for rollout
+        run: |
+          kubectl rollout status deployment/happi-web \
+          -n $K8S_NAMESPACE --timeout=120s
